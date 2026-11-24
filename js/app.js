@@ -226,7 +226,9 @@ return hdr('Кабинет мастерской')+notesHtml()+`<div class="tabs 
 // Обновление данных мастерской с сервера (новые заказы и заявки)
 async function refreshAdmin(){try{await Promise.all([loadShops(),loadDay(st.aday),loadProducts()]);st.err='';draw()}catch(e){fail(e)}}
 async function adminDay(k){st.aday=k;await refreshAdmin()}
-async function adminTab(t){st.tab=t;st.sheet=false;await refreshAdmin()}
+async function adminTab(t){st.tab=t;st.sheet=false;
+  if(t=='stats'){if(!st.smonth)st.smonth=curMonth();try{await loadStats()}catch(e){fail(e)}return}
+  await refreshAdmin()}
 
 // Лист заказа для производства: по городам, без названий магазинов, одинаковые позиции суммируются.
 // Общий итог по обоим городам — только когда в фильтре выбрано «Все».
@@ -245,10 +247,59 @@ return `<div class="noprint top"><button onclick="go('admin',{sheet:false})">Н�
 <div class="card"><h2>Сластёна: лист заказа на ${dn}</h2><p class="sub">Сводка для производства. Что испечь, по городам.</p><div class="noprint"><p class="sub">Скопируй текст ниже или нажми Ctrl+P.</p><textarea readonly rows="8" aria-label="Текст листа заказа" style="width:100%;border-radius:12px;border:1.5px solid var(--line);background:var(--bg);color:var(--ink);font:inherit;padding:8px">${esc(txt)}</textarea></div>
 ${blocks.map(b=>sheetHtml(b.title,b.lines)).join('')}</div>`}
 
-// Статистика: пока выдуманные цифры, в рабочей версии берутся из заказов
-function stats(){const m=[['июн',310],['июл',342],['авг',398],['сен',376],['окт',421],['ноя',289]];const mx=430;
-return `<div class="card"><h2>Выручка по месяцам, тыс. ₽</h2><p class="sub">Пример на выдуманных цифрах. В рабочей версии данные берутся из заказов.</p>
-<div class="bars">${m.map(([a,b])=>`<div><span>${b}</span><i style="height:${b/mx*100}%"></i><span>${a}</span></div>`).join('')}</div></div>`}
+// ===== Статистика за месяц (считается из реальных заказов) =====
+// Текущий месяц по времени Барнаула в формате ГГГГ-ММ
+function curMonth(){const n=nowLocal();return n.getFullYear()+'-'+String(n.getMonth()+1).padStart(2,'0')}
+// Первый и последний день месяца в формате ГГГГ-ММ-ДД
+function monthRange(ym){const [y,m]=ym.split('-').map(Number);const last=new Date(y,m,0).getDate();const mm=String(m).padStart(2,'0');
+  return [y+'-'+mm+'-01',y+'-'+mm+'-'+String(last).padStart(2,'0')]}
+
+// Загружает заказы выбранного месяца и сохраняет в st.sdata
+async function loadStats(){
+  const [a,b]=monthRange(st.smonth);
+  st.sdata=await dbOrdersBetween(a,b);
+  st.err='';draw();
+}
+async function setMonth(v){if(!v)return;st.smonth=v;try{await loadStats()}catch(e){fail(e)}}
+
+// Значение для CSV: кавычки, если есть разделитель, кавычка или перенос строки
+const csvCell=v=>{const s=String(v==null?'':v);return /[";\r\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s};
+
+// Выгрузка заказов за выбранный месяц в CSV (открывается в Excel).
+// Разделитель «;», десятичная запятая — так Excel в русской версии читает числа правильно.
+function exportCsv(){
+  const rows=st.sdata||[];
+  const lines=[['Дата доставки','Город','Магазин','Организация','ИНН','Товар','Ед.','Цена','Количество','Сумма'].join(';')];
+  rows.forEach(r=>{
+    const s=S.find(x=>x.id==r.shop_id)||{};
+    (r.items||[]).forEach(l=>lines.push([r.day,s.city,s.name,s.org,s.inn,l.n,l.u,
+      String(l.p).replace('.',','),String(l.q).replace('.',','),String(lineSum(l)).replace('.',',')]
+      .map(csvCell).join(';')));
+  });
+  // \uFEFF — метка UTF-8 (BOM), без неё Excel покажет русский текст кракозябрами
+  const blob=new Blob(['\uFEFF'+lines.join('\r\n')],{type:'text/csv;charset=utf-8'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);a.download='zakazy-'+st.smonth+'.csv';
+  document.body.appendChild(a);a.click();a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+}
+
+// Экран статистики: выручка, заказы по городам, продано по товарам
+function stats(){
+  const rows=st.sdata||[];
+  const revenue=sum(rows.reduce((all,r)=>all.concat(r.items),[]));
+  const cityOf=id=>{const s=S.find(x=>x.id==id);return s?s.city:'Без города'};
+  const byCity={};
+  rows.forEach(r=>{const c=cityOf(r.shop_id);byCity[c]=byCity[c]||{count:0,sum:0};byCity[c].count++;byCity[c].sum+=sum(r.items)});
+  const cityRows=Object.entries(byCity).map(([c,v])=>`<tr><td>${esc(c)}</td><td class="r">${v.count}</td><td class="r">${fmt(v.sum)}</td></tr>`).join('');
+  const prods=totals(rows.map(r=>r.items));
+  return `<div class="card"><h2>Статистика</h2>
+<p><label class="sub" for="smonth">Месяц</label> <input id="smonth" type="month" value="${esc(st.smonth)}" onchange="setMonth(this.value)" style="padding:8px 12px;border-radius:12px;border:1.5px solid var(--line);background:var(--bg);color:var(--ink);font:inherit"></p>
+<p><b>Заказов:</b> ${rows.length} · <b>Выручка:</b> ${fmt(revenue)}</p>
+<p class="noprint"><button class="main" onclick="exportCsv()" ${rows.length?'':'disabled'}>Скачать заказы месяца (Excel, CSV)</button></p>
+<h3>По городам</h3>${cityRows?`<table><tr><th>Город</th><th class="r">Заказов</th><th class="r">Сумма</th></tr>${cityRows}</table>`:'<p class="sub">За этот месяц заказов нет.</p>'}
+<h3>Продано за месяц</h3>${prods.length?`<table>${prods.map(t=>`<tr><td>${esc(t.n)}</td><td class="r"><b>${q(t.v)} ${t.u}</b></td></tr>`).join('')}</table>`:'<p class="sub">Продаж нет.</p>'}
+<p class="sub">Цены берутся из заказов на момент отправки, поэтому смена цены не меняет прошлые месяцы.</p></div>`}
 
 // Вкладка «Товары»: цена, лимит, наличие. Изменения сразу пишутся на сервер.
 function filt(){return `<input id="qs" type="search" placeholder="Поиск по названию" aria-label="Поиск по названию" value="${esc(st.qs)}" oninput="st.qs=this.value;draw();const i=document.getElementById('qs');i.focus();i.setSelectionRange(i.value.length,i.value.length)" style="width:100%;max-width:420px;margin:0 0 12px;padding:11px 14px;border-radius:14px;border:1.5px solid var(--line);background:var(--bg);color:var(--ink);font:inherit"><div class="chips">${CATS.map(c=>`<button class="${st.cat==c?'on':''}" onclick="st.cat='${c}';draw()">${c}</button>`).join('')}</div>`}

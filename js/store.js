@@ -31,6 +31,9 @@ async function dbLastOrder(){
   const r=ok(await db.from('orders').select('items').order('day',{ascending:false}).limit(1));
   return r.length?r[0].items:null}
 
+// Заказы за период (для статистики): мастерская видит все, по правилам базы
+async function dbOrdersBetween(from,to){return ok(await db.from('orders').select('shop_id,day,items').gte('day',from).lte('day',to))}
+
 // ----- Запись -----
 // Заказ принимает сервер: он сам проверяет срок, наличие, лимиты и подставляет цены
 async function dbSubmitOrder(day,cart){ok(await db.rpc('submit_order',{p_day:day,p_items:cart}))}
